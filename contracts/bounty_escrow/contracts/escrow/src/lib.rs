@@ -4234,6 +4234,48 @@ impl traits::UpgradeInterface for BountyEscrowContract {
     }
 }
 
+impl traits::PauseInterface for BountyEscrowContract {
+    fn set_paused(
+        env: &Env,
+        lock: Option<bool>,
+        release: Option<bool>,
+        refund: Option<bool>,
+        reason: Option<soroban_sdk::String>,
+    ) -> Result<(), crate::Error> {
+        BountyEscrowContract::set_paused(env.clone(), lock, release, refund, reason)
+    }
+
+    fn get_pause_flags(env: &Env) -> crate::PauseFlags {
+        BountyEscrowContract::get_pause_flags(env)
+    }
+
+    fn is_operation_paused(env: &Env, operation: soroban_sdk::Symbol) -> bool {
+        BountyEscrowContract::check_paused(env, operation)
+    }
+}
+
+impl traits::FeeInterface for BountyEscrowContract {
+    fn update_fee_config(
+        env: &Env,
+        lock_fee_rate: Option<i128>,
+        release_fee_rate: Option<i128>,
+        fee_recipient: Option<Address>,
+        fee_enabled: Option<bool>,
+    ) -> Result<(), crate::Error> {
+        BountyEscrowContract::update_fee_config(
+            env.clone(),
+            lock_fee_rate,
+            release_fee_rate,
+            fee_recipient,
+            fee_enabled,
+        )
+    }
+
+    fn get_fee_config(env: &Env) -> crate::FeeConfig {
+        BountyEscrowContract::get_fee_config(env.clone())
+    }
+}
+
 #[cfg(test)]
 mod test_state_verification;
 
