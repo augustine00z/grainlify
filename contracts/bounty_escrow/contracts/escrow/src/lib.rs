@@ -3206,10 +3206,7 @@ impl BountyEscrowContract {
         }
     }
 
-    fn dry_run_refund_impl(
-        env: &Env,
-        bounty_id: u64,
-    ) -> Result<(i128, EscrowStatus, i128), Error> {
+    fn dry_run_refund_impl(env: &Env, bounty_id: u64) -> Result<(i128, EscrowStatus, i128), Error> {
         if Self::check_paused(env, symbol_short!("refund")) {
             return Err(Error::FundsPaused);
         }
@@ -3221,8 +3218,7 @@ impl BountyEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(bounty_id))
             .unwrap();
-        if escrow.status != EscrowStatus::Locked
-            && escrow.status != EscrowStatus::PartiallyRefunded
+        if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::PartiallyRefunded
         {
             return Err(Error::FundsNotLocked);
         }
@@ -3250,11 +3246,7 @@ impl BountyEscrowContract {
             let full = app.mode == RefundMode::Full || app.amount >= escrow.remaining_amount;
             (app.amount, app.recipient, full)
         } else {
-            (
-                escrow.remaining_amount,
-                escrow.depositor.clone(),
-                true,
-            )
+            (escrow.remaining_amount, escrow.depositor.clone(), true)
         };
         if refund_amount <= 0 || refund_amount > escrow.remaining_amount {
             return Err(Error::InvalidAmount);
@@ -5159,10 +5151,9 @@ mod escrow_status_transition_tests {
         let amount = 1000;
         setup.setup_escrow_in_state(EscrowStatus::Released, bounty_id, amount);
         let deadline = setup.env.ledger().timestamp() + 1000;
-        let result =
-            setup
-                .client
-                .try_lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+        let result = setup
+            .client
+            .try_lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
         assert!(
             result.is_err(),
             "Expected locking an already released bounty to fail"
@@ -5275,6 +5266,8 @@ mod test_deadline_variants;
 #[cfg(test)]
 mod test_dry_run_simulation;
 #[cfg(test)]
+mod test_e2e_upgrade_with_pause;
+#[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]
 mod test_receipts;
@@ -5284,7 +5277,5 @@ mod test_sandbox;
 mod test_serialization_compatibility;
 #[cfg(test)]
 mod test_status_transitions;
-#[cfg(test)]
-mod test_e2e_upgrade_with_pause;
 #[cfg(test)]
 mod test_upgrade_scenarios;
