@@ -2,78 +2,122 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol,
 };
 
-// --- Enums y Structs permanecen igual ---
+/// Lifecycle state for a governance proposal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum ProposalStatus {
+    /// Proposal has been created but is not yet active.
     Pending,
+    /// Proposal is open for voting.
     Active,
+    /// Proposal met the approval criteria and can be executed after any delay.
     Approved,
+    /// Proposal failed quorum or approval checks.
     Rejected,
+    /// Proposal has been executed.
     Executed,
+    /// Proposal can no longer be executed.
     Expired,
 }
 
+/// Vote direction used when casting governance votes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum VoteType {
+    /// Support the proposal.
     For,
+    /// Oppose the proposal.
     Against,
+    /// Neither support nor oppose the proposal.
     Abstain,
 }
 
+/// Voting power model used by governance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum VotingScheme {
+    /// Each eligible participant has equal voting power.
     OnePersonOneVote,
+    /// Voting power is weighted by token holdings or stake.
     TokenWeighted,
 }
 
-#[derive(Clone, Debug)]
+/// On-chain representation of an upgrade governance proposal.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Proposal {
+    /// Sequential proposal identifier.
     pub id: u32,
+    /// Address that created the proposal.
     pub proposer: Address,
+    /// WASM hash proposed for execution.
     pub new_wasm_hash: BytesN<32>,
+    /// Short proposal description.
     pub description: Symbol,
+    /// Ledger timestamp when the proposal was created.
     pub created_at: u64,
+    /// Ledger timestamp when voting begins.
     pub voting_start: u64,
+    /// Ledger timestamp when voting ends.
     pub voting_end: u64,
+    /// Delay between approval and execution.
     pub execution_delay: u64,
+    /// Current proposal status.
     pub status: ProposalStatus,
+    /// Weighted votes in favor.
     pub votes_for: i128,
+    /// Weighted votes against.
     pub votes_against: i128,
+    /// Weighted abstain votes.
     pub votes_abstain: i128,
+    /// Number of unique votes cast.
     pub total_votes: u32,
 }
 
-#[derive(Clone, Debug)]
+/// Immutable governance parameters set during `init_governance`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct GovernanceConfig {
+    /// Voting period in ledger seconds.
     pub voting_period: u64,
+    /// Delay after approval before execution may occur.
     pub execution_delay: u64,
+    /// Minimum quorum in basis points, where `10_000 == 100%`.
     pub quorum_percentage: u32,
+    /// Minimum approval ratio in basis points, where `10_000 == 100%`.
     pub approval_threshold: u32,
+    /// Minimum stake required to create a proposal.
     pub min_proposal_stake: i128,
+    /// Voting power model to apply.
     pub voting_scheme: VotingScheme,
 }
 
-#[derive(Clone, Debug)]
+/// Recorded vote for a governance proposal.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Vote {
+    /// Address that cast the vote.
     pub voter: Address,
+    /// Proposal identifier the vote belongs to.
     pub proposal_id: u32,
+    /// Direction of the vote.
     pub vote_type: VoteType,
+    /// Voting power applied to this vote.
     pub voting_power: i128,
+    /// Ledger timestamp when the vote was cast.
     pub timestamp: u64,
 }
 
-// Storage keys
+/// Storage key containing the proposal map.
 pub const PROPOSALS: Symbol = symbol_short!("PROPOSALS");
+/// Storage key containing the next governance proposal id.
 pub const PROPOSAL_COUNT: Symbol = symbol_short!("PROP_CNT");
+/// Storage key containing recorded votes.
 pub const VOTES: Symbol = symbol_short!("VOTES");
+/// Storage key containing the immutable governance configuration.
 pub const GOVERNANCE_CONFIG: Symbol = symbol_short!("GOV_CFG");
 
+/// Governance errors returned by the standalone governance contract.
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -94,28 +138,38 @@ pub enum Error {
     ProposalExpired = 14,
 }
 
+/// Validates the immutable governance configuration used during initialization.
+pub(crate) fn validate_config(config: &GovernanceConfig) -> Result<(), Error> {
+    if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
+        return Err(Error::InvalidThreshold);
+    }
+
+    if config.approval_threshold < 5000 {
+        return Err(Error::ThresholdTooLow);
+    }
+
+    Ok(())
+}
+
 #[contract]
 pub struct GovernanceContract;
 
 #[contractimpl]
 impl GovernanceContract {
+    /// Initializes governance state for the standalone governance contract.
     pub fn init_governance(
         env: Env,
         admin: Address,
         config: GovernanceConfig,
     ) -> Result<(), Error> {
         admin.require_auth();
-        if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
-            return Err(Error::InvalidThreshold);
-        }
-        if config.approval_threshold < 5000 {
-            return Err(Error::ThresholdTooLow);
-        }
+        validate_config(&config)?;
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
         Ok(())
     }
 
+    /// Creates a new governance proposal.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -164,6 +218,7 @@ impl GovernanceContract {
         Ok(proposal_id)
     }
 
+    /// Casts a vote for an active proposal.
     pub fn cast_vote(
         env: Env,
         voter: Address,
@@ -240,6 +295,7 @@ impl GovernanceContract {
         Ok(())
     }
 
+    /// Finalizes a proposal after the voting window has closed.
     pub fn finalize_proposal(env: Env, proposal_id: u32) -> Result<ProposalStatus, Error> {
         let mut proposals: Map<u32, Proposal> = env
             .storage()
