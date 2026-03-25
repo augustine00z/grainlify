@@ -1034,6 +1034,88 @@ impl ProgramEscrowContract {
                 fee_enabled: false,
             })
     }
+
+    /// Set the lock fee rate (admin-only).
+    ///
+    /// # Arguments
+    /// * `rate` - Fee rate in basis points (1 bp = 0.01%, max 50%)
+    pub fn set_lock_fee_rate(env: Env, rate: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        if rate > token_math::MAX_FEE_RATE {
+            panic!("Fee rate exceeds maximum allowed");
+        }
+
+        let mut config = Self::get_fee_config_internal(&env);
+        config.lock_fee_rate = rate;
+        env.storage().instance().set(&FEE_CONFIG, &config);
+    }
+
+    /// Set the payout fee rate (admin-only).
+    ///
+    /// # Arguments
+    /// * `rate` - Fee rate in basis points (1 bp = 0.01%, max 50%)
+    pub fn set_payout_fee_rate(env: Env, rate: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        if rate > token_math::MAX_FEE_RATE {
+            panic!("Fee rate exceeds maximum allowed");
+        }
+
+        let mut config = Self::get_fee_config_internal(&env);
+        config.payout_fee_rate = rate;
+        env.storage().instance().set(&FEE_CONFIG, &config);
+    }
+
+    /// Set the fee recipient address (admin-only).
+    ///
+    /// # Arguments
+    /// * `recipient` - Address to receive collected fees
+    pub fn set_fee_recipient(env: Env, recipient: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        let mut config = Self::get_fee_config_internal(&env);
+        config.fee_recipient = recipient;
+        env.storage().instance().set(&FEE_CONFIG, &config);
+    }
+
+    /// Enable or disable fee collection (admin-only).
+    ///
+    /// # Arguments
+    /// * `enabled` - True to enable fee collection, false to disable
+    pub fn set_fees_enabled(env: Env, enabled: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("Not initialized"));
+        admin.require_auth();
+
+        let mut config = Self::get_fee_config_internal(&env);
+        config.fee_enabled = enabled;
+        env.storage().instance().set(&FEE_CONFIG, &config);
+    }
+
+    /// Get current fee configuration (public).
+    pub fn get_fee_config(env: Env) -> FeeConfig {
+        Self::get_fee_config_internal(&env)
+    }
+
     /// Check if a program exists (legacy single-program check)
     ///
     /// # Returns
@@ -1052,13 +1134,20 @@ impl ProgramEscrowContract {
     // Fund Management
     // ========================================================================
 
-    /// Lock initial funds into the program escrow
+    /// Lock funds into the program escrow with optional fee deduction.
+    ///
+    /// When fees are enabled, the lock fee is deducted from `amount`. Only the net
+    /// amount is added to `total_funds` and `remaining_balance`. The fee is transferred
+    /// to the configured fee recipient.
     ///
     /// # Arguments
-    /// * `amount` - Amount of funds to lock (in native token units)
+    /// * `amount` - Gross amount to lock (in native token units)
     ///
     /// # Returns
-    /// Updated ProgramData with locked funds
+    /// Updated ProgramData with locked funds and net balance after fees
+    ///
+    /// # Overflow Safety
+    /// Uses `checked_add` to prevent balance overflow. Panics if overflow would occur.
     pub fn lock_program_funds(env: Env, amount: i128) -> ProgramData {
         // Validation precedence (deterministic ordering):
         // 1. Contract initialized
@@ -1082,9 +1171,34 @@ impl ProgramEscrowContract {
 
         let mut program_data: ProgramData = env.storage().instance().get(&PROGRAM_DATA).unwrap();
 
-        // Update balances
-        program_data.total_funds += amount;
-        program_data.remaining_balance += amount;
+        // Get fee configuration
+        let fee_config = Self::get_fee_config_internal(&env);
+        
+        // Calculate fees if enabled
+        let (fee_amount, net_amount) = if fee_config.fee_enabled && fee_config.lock_fee_rate > 0 {
+            let (fee, net) = token_math::split_amount(amount, fee_config.lock_fee_rate);
+            (fee, net)
+        } else {
+            (0i128, amount)
+        };
+
+        // Transfer fee to recipient if fee > 0
+        if fee_amount > 0 {
+            let contract_address = env.current_contract_address();
+            let token_client = token::Client::new(&env, &program_data.token_address);
+            token_client.transfer(&contract_address, &fee_config.fee_recipient, &fee_amount);
+        }
+
+        // Update balances with overflow safety
+        program_data.total_funds = program_data
+            .total_funds
+            .checked_add(amount)
+            .unwrap_or_else(|| panic!("Total funds overflow"));
+        
+        program_data.remaining_balance = program_data
+            .remaining_balance
+            .checked_add(net_amount)
+            .unwrap_or_else(|| panic!("Remaining balance overflow"));
 
         // Store updated data
         env.storage().instance().set(&PROGRAM_DATA, &program_data);
