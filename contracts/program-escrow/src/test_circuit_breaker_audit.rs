@@ -3,17 +3,41 @@ mod test {
     use crate::error_recovery::{self, CircuitBreakerKey, CircuitState};
     use crate::{ProgramEscrowContract, ProgramEscrowContractClient};
     use soroban_sdk::{
+        symbol_short,
         testutils::{Address as _, Events, Ledger},
-        symbol_short, vec, Address, Env, String,
+        token, vec, Address, Env, IntoVal, String, Symbol,
     };
 
+    fn has_topic_pair(
+        env: &Env,
+        topics: &soroban_sdk::Vec<soroban_sdk::Val>,
+        first: Symbol,
+        second: Symbol,
+    ) -> bool {
+        if topics.len() < 2 {
+            return false;
+        }
+
+        let expected = vec![env, first.into_val(env), second.into_val(env)];
+        *topics == expected
+    }
+
     fn setup_test(env: &Env) -> (ProgramEscrowContractClient, Address) {
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, ProgramEscrowContract);
         let client = ProgramEscrowContractClient::new(env, &contract_id);
         let admin = Address::generate(env);
         client.initialize_contract(&admin);
         client.set_circuit_admin(&admin, &None);
         (client, admin)
+    }
+
+    fn create_token(env: &Env, admin: &Address, amount: i128) -> Address {
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_address = sac.address();
+        let token_admin = token::StellarAssetClient::new(env, &token_address);
+        token_admin.mint(admin, &amount);
+        token_address
     }
 
     #[test]
@@ -157,7 +181,12 @@ mod test {
         let circuit_events = env.events().all();
         let ev = circuit_events.get(circuit_events.len() - 1).unwrap();
         assert_eq!(ev.0, client.address);
-        assert_eq!(ev.1, (symbol_short!("circuit"), symbol_short!("cb_adm")));
+        assert!(has_topic_pair(
+            &env,
+            &ev.1,
+            symbol_short!("circuit"),
+            symbol_short!("cb_adm")
+        ));
     }
 
     #[test]
@@ -178,7 +207,12 @@ mod test {
         // Check for cb_reset event
         let mut found = false;
         for ev in circuit_events.iter() {
-            if ev.1 == (symbol_short!("circuit"), symbol_short!("cb_reset")) {
+            if has_topic_pair(
+                &env,
+                &ev.1,
+                symbol_short!("circuit"),
+                symbol_short!("cb_reset"),
+            ) {
                 found = true;
                 break;
             }
@@ -195,7 +229,12 @@ mod test {
 
         let circuit_events = env.events().all();
         let ev = circuit_events.get(circuit_events.len() - 1).unwrap();
-        assert_eq!(ev.1, (symbol_short!("circuit"), symbol_short!("cb_cfg")));
+        assert!(has_topic_pair(
+            &env,
+            &ev.1,
+            symbol_short!("circuit"),
+            symbol_short!("cb_cfg")
+        ));
     }
 
     #[test]
@@ -207,18 +246,22 @@ mod test {
 
         let events = env.events().all();
         let ev = events.get(events.len() - 1).unwrap();
-        assert_eq!(ev.1, (symbol_short!("rate_lim"), symbol_short!("update")));
+        assert!(has_topic_pair(
+            &env,
+            &ev.1,
+            symbol_short!("rate_lim"),
+            symbol_short!("update")
+        ));
     }
 
     #[test]
     fn test_payout_respects_circuit_breaker() {
         let env = Env::default();
-        env.mock_all_auths();
         let (client, admin) = setup_test(&env);
 
         let user = Address::generate(&env);
-        let token_addr = Address::generate(&env); // Mock token
-        
+        let token_addr = create_token(&env, &admin, 1_000i128);
+
         // Initialize program
         client.init_program(
             &String::from_str(&env, "prog1"),
@@ -242,13 +285,12 @@ mod test {
     #[test]
     fn test_batch_payout_respects_circuit_breaker() {
         let env = Env::default();
-        env.mock_all_auths();
         let (client, admin) = setup_test(&env);
 
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
-        let token_addr = Address::generate(&env);
-        
+        let token_addr = create_token(&env, &admin, 1_000i128);
+
         client.init_program(
             &String::from_str(&env, "prog1"),
             &admin,
@@ -264,7 +306,8 @@ mod test {
         });
 
         // Try batch payout - should panic
-        let result = client.try_batch_payout(&vec![&env, user1, user2], &vec![&env, 50i128, 50i128]);
+        let result =
+            client.try_batch_payout(&vec![&env, user1, user2], &vec![&env, 50i128, 50i128]);
         assert!(result.is_err());
     }
 }

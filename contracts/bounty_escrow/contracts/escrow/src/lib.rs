@@ -650,6 +650,7 @@ pub struct EscrowInfo {
 pub enum DataKey {
     Admin,
     Token,
+    Version,
     Escrow(u64),     // bounty_id
     EscrowAnon(u64), // bounty_id anonymous escrow variant
     Metadata(u64),
@@ -973,6 +974,7 @@ impl BountyEscrowContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
+        env.storage().instance().set(&DataKey::Version, &1u32);
 
         events::emit_bounty_initialized(
             &env,
@@ -1013,6 +1015,25 @@ impl BountyEscrowContract {
         env: Env,
     ) -> (Option<soroban_sdk::String>, Option<soroban_sdk::String>) {
         (Self::get_chain_id(env.clone()), Self::get_network_id(env))
+    }
+
+    /// Return the persisted contract version.
+    pub fn get_version(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    /// Update the persisted contract version (admin only).
+    pub fn set_version(env: Env, new_version: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &new_version);
+        Ok(())
     }
 
     /// Calculate fee amount based on rate (in basis points), using **ceiling division**.
@@ -4984,6 +5005,26 @@ impl traits::EscrowInterface for BountyEscrowContract {
         BountyEscrowContract::release_funds(env.clone(), bounty_id, contributor)
     }
 
+    /// Partial release through the trait interface
+    fn partial_release(
+        env: &Env,
+        bounty_id: u64,
+        contributor: Address,
+        payout_amount: i128,
+    ) -> Result<(), crate::Error> {
+        BountyEscrowContract::partial_release(env.clone(), bounty_id, contributor, payout_amount)
+    }
+
+    /// Batch lock funds through the trait interface
+    fn batch_lock_funds(env: &Env, items: Vec<LockFundsItem>) -> Result<u32, crate::Error> {
+        BountyEscrowContract::batch_lock_funds(env.clone(), items)
+    }
+
+    /// Batch release funds through the trait interface
+    fn batch_release_funds(env: &Env, items: Vec<ReleaseFundsItem>) -> Result<u32, crate::Error> {
+        BountyEscrowContract::batch_release_funds(env.clone(), items)
+    }
+
     /// Refund funds to depositor through the trait interface
     fn refund(env: &Env, bounty_id: u64) -> Result<(), crate::Error> {
         BountyEscrowContract::refund(env.clone(), bounty_id)
@@ -5003,14 +5044,12 @@ impl traits::EscrowInterface for BountyEscrowContract {
 impl traits::UpgradeInterface for BountyEscrowContract {
     /// Get contract version
     fn get_version(env: &Env) -> u32 {
-        1 // Current version
+        BountyEscrowContract::get_version(env.clone())
     }
 
     /// Set contract version (admin only)
-    fn set_version(env: &Env, _new_version: u32) -> Result<(), soroban_sdk::String> {
-        // Version management - reserved for future use
-        // Currently, version is hardcoded to 1
-        Ok(())
+    fn set_version(env: &Env, new_version: u32) -> Result<(), crate::Error> {
+        BountyEscrowContract::set_version(env.clone(), new_version)
     }
 }
 

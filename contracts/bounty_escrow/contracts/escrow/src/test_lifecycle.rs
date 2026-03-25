@@ -142,25 +142,36 @@ fn test_full_bounty_lifecycle_with_refund() {
     assert!(approval.is_some());
 
     // 8. Execute partial refund payout
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &escrow_client.address,
-            fn_name: "refund",
-            args: (bounty_id,).into_val(&env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &token_client.address,
-                fn_name: "transfer",
-                args: (
-                    escrow_client.address.clone(),
-                    depositor.clone(),
-                    refund_amount,
-                )
-                    .into_val(&env),
+    env.mock_auths(&[
+        MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &escrow_client.address,
+                fn_name: "refund",
+                args: (bounty_id,).into_val(&env),
                 sub_invokes: &[],
-            }],
+            },
         },
-    }]);
+        MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &escrow_client.address,
+                fn_name: "refund",
+                args: (bounty_id,).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token_client.address,
+                    fn_name: "transfer",
+                    args: (
+                        escrow_client.address.clone(),
+                        depositor.clone(),
+                        refund_amount,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        },
+    ]);
     escrow_client.refund(&bounty_id);
 
     // Verify partially refunded state
@@ -193,25 +204,36 @@ fn test_full_bounty_lifecycle_with_refund() {
     escrow_client.approve_refund(&bounty_id, &final_amount, &depositor, &RefundMode::Full);
 
     // Set auth for final refund with nested token transfer
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &escrow_client.address,
-            fn_name: "refund",
-            args: (bounty_id,).into_val(&env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &token_client.address,
-                fn_name: "transfer",
-                args: (
-                    escrow_client.address.clone(),
-                    depositor.clone(),
-                    final_amount,
-                )
-                    .into_val(&env),
+    env.mock_auths(&[
+        MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &escrow_client.address,
+                fn_name: "refund",
+                args: (bounty_id,).into_val(&env),
                 sub_invokes: &[],
-            }],
+            },
         },
-    }]);
+        MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &escrow_client.address,
+                fn_name: "refund",
+                args: (bounty_id,).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token_client.address,
+                    fn_name: "transfer",
+                    args: (
+                        escrow_client.address.clone(),
+                        depositor.clone(),
+                        final_amount,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        },
+    ]);
 
     escrow_client.refund(&bounty_id);
 

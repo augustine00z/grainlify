@@ -225,10 +225,6 @@ fn serialization_compatibility_public_types_and_events() {
                 released: false,
                 released_at: None,
                 released_by: None,
-                approval: PayoutApprovalRecord {
-                    approver: Address::generate(&env),
-                    approved_at: 123,
-                },
             }
             .into_val(&env),
         ),
@@ -275,16 +271,6 @@ fn serialization_compatibility_public_types_and_events() {
                 threshold_amount: 1000,
                 signers: soroban_sdk::vec![&env, admin.clone(), authorized.clone()],
                 required_signatures: 2,
-            }
-            .into_val(&env),
-        ),
-        (
-            "PayoutApproval",
-            PayoutApproval {
-                program_id: program_id.clone(),
-                recipient: recipient.clone(),
-                amount: 123,
-                approvals: soroban_sdk::vec![&env, admin.clone()],
             }
             .into_val(&env),
         ),
