@@ -82,6 +82,7 @@ fn serialization_compatibility_public_types_and_events() {
         votes_against: 5,
         votes_abstain: 1,
         total_votes: 3,
+        stake_amount: 100,
     };
 
     let governance_config = GovernanceConfig {
@@ -91,6 +92,7 @@ fn serialization_compatibility_public_types_and_events() {
         approval_threshold: 7000,
         min_proposal_stake: 123,
         voting_scheme: VotingScheme::OnePersonOneVote,
+        governance_token: contract_address(&env, 0x05),
     };
 
     let vote = Vote {
