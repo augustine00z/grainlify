@@ -7,6 +7,8 @@ mod reentrancy_guard;
 #[cfg(test)]
 mod test_metadata;
 
+#[cfg(test)]
+mod test_boundary_edge_cases;
 mod test_cross_contract_interface;
 #[cfg(test)]
 mod test_deterministic_randomness;
@@ -604,9 +606,13 @@ pub enum Error {
     UpgradeSafetyCheckFailed = 43,
 }
 
+/// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).
 pub const RISK_FLAG_HIGH_RISK: u32 = 1 << 0;
+/// Bit flag: manual or automated review is in progress; may restrict certain operations off-chain.
 pub const RISK_FLAG_UNDER_REVIEW: u32 = 1 << 1;
+/// Bit flag: restricted handling (e.g. compliance); informational for integrators.
 pub const RISK_FLAG_RESTRICTED: u32 = 1 << 2;
+/// Bit flag: aligned with soft-deprecation signaling; distinct from contract-level deprecation.
 pub const RISK_FLAG_DEPRECATED: u32 = 1 << 3;
 
 /// Notification preference flags (bitfield).
@@ -1036,6 +1042,9 @@ impl BountyEscrowContract {
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
+        }
+        if admin == token {
+            return Err(Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
@@ -4607,6 +4616,69 @@ impl BountyEscrowContract {
             .ok_or(Error::BountyNotFound)
     }
 
+    /// Set notification preference flags for a bounty (depositor only).
+    ///
+    /// Requires an existing escrow for `bounty_id` with `depositor` as the recorded depositor.
+    /// Creates metadata row if absent (same defaults as risk-flag helpers). Emits
+    /// [`NotificationPreferencesUpdated`].
+    pub fn set_notification_preferences(
+        env: Env,
+        depositor: Address,
+        bounty_id: u64,
+        prefs: u32,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        depositor.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(bounty_id))
+            .ok_or(Error::BountyNotFound)?;
+        if escrow.depositor != depositor {
+            return Err(Error::Unauthorized);
+        }
+
+        let created = !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Metadata(bounty_id));
+        let mut metadata = env
+            .storage()
+            .persistent()
+            .get::<DataKey, EscrowMetadata>(&DataKey::Metadata(bounty_id))
+            .unwrap_or(EscrowMetadata {
+                repo_id: 0,
+                issue_id: 0,
+                bounty_type: soroban_sdk::String::from_str(&env, ""),
+                risk_flags: 0,
+                notification_prefs: 0,
+                reference_hash: None,
+            });
+
+        let previous_prefs = metadata.notification_prefs;
+        metadata.notification_prefs = prefs;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Metadata(bounty_id), &metadata);
+
+        emit_notification_preferences_updated(
+            &env,
+            NotificationPreferencesUpdated {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                previous_prefs,
+                new_prefs: prefs,
+                actor: depositor,
+                created,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Ok(())
+    }
+
     /// Build the context bytes that feed into the deterministic PRNG.
     ///
     /// The context binds selection to the current contract address, bounty
@@ -4909,6 +4981,18 @@ impl BountyEscrowContract {
         Ok(ticket_id)
     }
 
+    /// Replace the escrow's risk bitfield for [`EscrowMetadata::risk_flags`] (admin-only).
+    ///
+    /// Persists metadata for `bounty_id` if missing, then sets `risk_flags = flags`.
+    /// Emits [`crate::events::RiskFlagsUpdated`] with `previous_flags` and `new_flags` so indexers
+    /// can reconcile state. Payload fields mirror the program-escrow risk pattern (version, ids,
+    /// previous/new flags, admin, timestamp); the event topic is `symbol_short!("risk")` plus `bounty_id`.
+    ///
+    /// # Authorization
+    /// The registered admin must authorize this call (`require_auth` on admin).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — `init` has not been run.
     pub fn set_escrow_risk_flags(
         env: Env,
         bounty_id: u64,
@@ -4956,6 +5040,15 @@ impl BountyEscrowContract {
         Ok(metadata)
     }
 
+    /// Clear selected risk bits (`metadata.risk_flags &= !flags`) (admin-only).
+    ///
+    /// Emits [`crate::events::RiskFlagsUpdated`] with before/after values for consistent downstream handling.
+    ///
+    /// # Authorization
+    /// The registered admin must authorize this call.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — `init` has not been run.
     pub fn clear_escrow_risk_flags(
         env: Env,
         bounty_id: u64,
@@ -5105,13 +5198,20 @@ impl traits::PauseInterface for BountyEscrowContract {
     }
 
     fn get_pause_flags(env: &Env) -> crate::PauseFlags {
-        let entrypoint: fn(&Env) -> crate::PauseFlags = BountyEscrowContract::get_pause_flags;
-        entrypoint(env)
+        env.storage()
+            .instance()
+            .get(&DataKey::PauseFlags)
+            .unwrap_or(PauseFlags {
+                lock_paused: false,
+                release_paused: false,
+                refund_paused: false,
+                pause_reason: None,
+                paused_at: 0,
+            })
     }
 
     fn is_operation_paused(env: &Env, operation: soroban_sdk::Symbol) -> bool {
-        let entrypoint: fn(&Env, soroban_sdk::Symbol) -> bool = BountyEscrowContract::check_paused;
-        entrypoint(env, operation)
+        Self::check_paused(env, operation)
     }
 }
 

@@ -139,7 +139,6 @@
 //! 5. **Balance Checks**: Verify remaining balance matches expectations
 //! 6. **Token Approval**: Ensure contract has token allowance before locking funds
 
-#![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
     String, Symbol, Vec,
@@ -257,7 +256,7 @@ mod monitoring {
     }
 
     // Track operation
-    pub fn track_operation(env: &Env, operation: Symbol, caller: Address, success: bool) {
+    pub fn track_operation(env: &Env, _operation: Symbol, _caller: Address, success: bool) {
         let key = Symbol::new(env, OPERATION_COUNT);
         let count: u64 = env.storage().persistent().get(&key).unwrap_or(0);
         env.storage().persistent().set(&key, &(count + 1));
@@ -460,7 +459,7 @@ pub enum DataKey {
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
     NextScheduleId(String),          // program_id -> next schedule_id
     MultisigConfig(String),          // program_id -> MultisigConfig
-    SplitConfig(String),             // program_id -> SplitConfig
+    SplitConfig(String),             // program_id -> SplitConfig (payout splits)
     PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
     PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
     ClaimWindow,                     // u64 seconds (global config)
@@ -527,6 +526,40 @@ pub struct Analytics {
     pub total_payouts: u32,
     pub active_programs: u32,
     pub operation_count: u32,
+}
+
+/// Program reputation metrics tracking performance and reliability.
+/// Includes counts of payouts and schedules, funds tracking, and performance scores in basis points.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramReputation {
+    /// Total number of direct payouts executed
+    pub total_payouts: u32,
+    /// Total number of release schedules created
+    pub total_scheduled: u32,
+    /// Number of schedules successfully released
+    pub completed_releases: u32,
+    /// Number of schedules awaiting release
+    pub pending_releases: u32,
+    /// Number of schedules past their release timestamp (not yet released)
+    pub overdue_releases: u32,
+    /// Count of disputes (reserved for future use)
+    pub dispute_count: u32,
+    /// Count of refunds (reserved for future use)
+    pub refund_count: u32,
+    /// Total funds locked in escrow
+    pub total_funds_locked: i128,
+    /// Total funds distributed via payouts
+    pub total_funds_distributed: i128,
+    /// Completion rate: (completed_releases / total_scheduled) * 10_000, capped at 10_000
+    /// Defaults to 10_000 if no schedules exist
+    pub completion_rate_bps: u32,
+    /// Payout fulfillment rate: (total_funds_distributed / total_funds_locked) * 10_000
+    /// Defaults to 0 if no funds locked, capped at 10_000
+    pub payout_fulfillment_rate_bps: u32,
+    /// Overall reputation score in basis points (0-10_000)
+    /// Returns 0 if any overdue releases exist (reputation penalty for overdue milestones)
+    pub overall_score_bps: u32,
 }
 
 #[contracttype]
@@ -829,6 +862,18 @@ impl ProgramEscrowContract {
         // Store program data
         env.storage().instance().set(&PROGRAM_DATA, &program_data);
 
+        if !env.storage().instance().has(&FEE_CONFIG) {
+            env.storage().instance().set(
+                &FEE_CONFIG,
+                &FeeConfig {
+                    lock_fee_rate: 0,
+                    payout_fee_rate: 0,
+                    fee_recipient: authorized_payout_key.clone(),
+                    fee_enabled: false,
+                },
+            );
+        }
+
         // Fallback for legacy tests: if admin not set, set it to authorized_payout_key
         if !env.storage().instance().has(&DataKey::Admin) {
             env.storage()
@@ -887,7 +932,7 @@ impl ProgramEscrowContract {
         // Apply rate limiting
         anti_abuse::check_rate_limit(&env, authorized_payout_key.clone());
 
-        let start = env.ledger().timestamp();
+        let _start = env.ledger().timestamp();
         let caller = authorized_payout_key.clone();
 
         // Validate program_id (basic length check)
@@ -2159,6 +2204,16 @@ impl ProgramEscrowContract {
         program_id: String,
         beneficiaries: Vec<BeneficiarySplit>,
     ) -> SplitConfig {
+        if let Some(admin) = env.storage().instance().get::<_, Address>(&DataKey::Admin) {
+            admin.require_auth();
+        } else {
+            let program: ProgramData = env
+                .storage()
+                .instance()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| panic!("Program not initialized"));
+            program.authorized_payout_key.require_auth();
+        }
         payout_splits::set_split_config(&env, &program_id, beneficiaries)
     }
 
@@ -2167,6 +2222,16 @@ impl ProgramEscrowContract {
     }
 
     pub fn disable_split_config(env: Env, program_id: String) {
+        if let Some(admin) = env.storage().instance().get::<_, Address>(&DataKey::Admin) {
+            admin.require_auth();
+        } else {
+            let program: ProgramData = env
+                .storage()
+                .instance()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| panic!("Program not initialized"));
+            program.authorized_payout_key.require_auth();
+        }
         payout_splits::disable_split_config(&env, &program_id);
     }
 
@@ -2175,6 +2240,12 @@ impl ProgramEscrowContract {
         program_id: String,
         total_amount: i128,
     ) -> payout_splits::SplitPayoutResult {
+        let program: ProgramData = env
+            .storage()
+            .instance()
+            .get(&PROGRAM_DATA)
+            .unwrap_or_else(|| panic!("Program not initialized"));
+        program.authorized_payout_key.require_auth();
         payout_splits::execute_split_payout(&env, &program_id, total_amount)
     }
 
@@ -2730,8 +2801,6 @@ impl ProgramEscrowContract {
         claim_period::get_claim_window(&env)
     }
 
-    // ========================================================================
-    // Dispute Resolution
     // ========================================================================
     // Dispute Resolution
     // ========================================================================
