@@ -819,6 +819,10 @@ pub struct AntiAbuseConfigView {
 pub struct FeeConfig {
     pub lock_fee_rate: i128,
     pub release_fee_rate: i128,
+    /// Flat fee (token smallest units) added on each lock, before cap to deposit amount.
+    pub lock_fixed_fee: i128,
+    /// Flat fee added on each full release or partial payout, before cap to payout amount.
+    pub release_fixed_fee: i128,
     pub fee_recipient: Address,
     pub fee_enabled: bool,
 }
@@ -840,6 +844,8 @@ pub struct TokenFeeConfig {
     pub lock_fee_rate: i128,
     /// Fee rate on release, in basis points.
     pub release_fee_rate: i128,
+    pub lock_fixed_fee: i128,
+    pub release_fixed_fee: i128,
     /// Address that receives fees collected for this token.
     pub fee_recipient: Address,
     /// Whether fee collection is active for this token.
@@ -1140,10 +1146,34 @@ impl BountyEscrowContract {
         numerator / BASIS_POINTS
     }
 
+    /// Total fee on `amount`: ceiling percentage plus optional fixed, capped at `amount`.
+    fn combined_fee_amount(amount: i128, rate_bps: i128, fixed: i128, fee_enabled: bool) -> i128 {
+        if !fee_enabled || amount <= 0 {
+            return 0;
+        }
+        if fixed < 0 {
+            return 0;
+        }
+        let pct = Self::calculate_fee(amount, rate_bps);
+        let sum = pct.saturating_add(fixed);
+        sum.min(amount).max(0)
+    }
+
     /// Test-only shim exposing `calculate_fee` for unit-level assertions.
     #[cfg(test)]
     pub fn calculate_fee_pub(amount: i128, fee_rate: i128) -> i128 {
         Self::calculate_fee(amount, fee_rate)
+    }
+
+    /// Test-only: combined percentage + fixed fee (capped).
+    #[cfg(test)]
+    pub fn combined_fee_pub(
+        amount: i128,
+        rate_bps: i128,
+        fixed: i128,
+        fee_enabled: bool,
+    ) -> i128 {
+        Self::combined_fee_amount(amount, rate_bps, fixed, fee_enabled)
     }
 
     /// Get fee configuration (internal helper)
@@ -1154,6 +1184,8 @@ impl BountyEscrowContract {
             .unwrap_or_else(|| FeeConfig {
                 lock_fee_rate: 0,
                 release_fee_rate: 0,
+                lock_fixed_fee: 0,
+                release_fixed_fee: 0,
                 fee_recipient: env.storage().instance().get(&DataKey::Admin).unwrap(),
                 fee_enabled: false,
             })
@@ -1164,6 +1196,8 @@ impl BountyEscrowContract {
         env: Env,
         lock_fee_rate: Option<i128>,
         release_fee_rate: Option<i128>,
+        lock_fixed_fee: Option<i128>,
+        release_fixed_fee: Option<i128>,
         fee_recipient: Option<Address>,
         fee_enabled: Option<bool>,
     ) -> Result<(), Error> {
@@ -1190,6 +1224,20 @@ impl BountyEscrowContract {
             fee_config.release_fee_rate = rate;
         }
 
+        if let Some(fixed) = lock_fixed_fee {
+            if fixed < 0 {
+                return Err(Error::InvalidAmount);
+            }
+            fee_config.lock_fixed_fee = fixed;
+        }
+
+        if let Some(fixed) = release_fixed_fee {
+            if fixed < 0 {
+                return Err(Error::InvalidAmount);
+            }
+            fee_config.release_fixed_fee = fixed;
+        }
+
         if let Some(recipient) = fee_recipient {
             fee_config.fee_recipient = recipient;
         }
@@ -1207,6 +1255,8 @@ impl BountyEscrowContract {
             events::FeeConfigUpdated {
                 lock_fee_rate: fee_config.lock_fee_rate,
                 release_fee_rate: fee_config.release_fee_rate,
+                lock_fixed_fee: fee_config.lock_fixed_fee,
+                release_fixed_fee: fee_config.release_fixed_fee,
                 fee_recipient: fee_config.fee_recipient.clone(),
                 fee_enabled: fee_config.fee_enabled,
                 timestamp: env.ledger().timestamp(),
@@ -1861,6 +1911,7 @@ impl BountyEscrowContract {
     /// * `token`            – the token contract address this config applies to
     /// * `lock_fee_rate`    – fee rate on lock in basis points (0 – 5 000)
     /// * `release_fee_rate` – fee rate on release in basis points (0 – 5 000)
+    /// * `lock_fixed_fee` / `release_fixed_fee` – flat fees in token units (≥ 0)
     /// * `fee_recipient`    – address that receives fees for this token
     /// * `fee_enabled`      – whether fee collection is active
     ///
@@ -1872,6 +1923,8 @@ impl BountyEscrowContract {
         token: Address,
         lock_fee_rate: i128,
         release_fee_rate: i128,
+        lock_fixed_fee: i128,
+        release_fixed_fee: i128,
         fee_recipient: Address,
         fee_enabled: bool,
     ) -> Result<(), Error> {
@@ -1887,10 +1940,15 @@ impl BountyEscrowContract {
         if !(0..=MAX_FEE_RATE).contains(&release_fee_rate) {
             return Err(Error::InvalidFeeRate);
         }
+        if lock_fixed_fee < 0 || release_fixed_fee < 0 {
+            return Err(Error::InvalidAmount);
+        }
 
         let config = TokenFeeConfig {
             lock_fee_rate,
             release_fee_rate,
+            lock_fixed_fee,
+            release_fixed_fee,
             fee_recipient,
             fee_enabled,
         };
@@ -1915,7 +1973,7 @@ impl BountyEscrowContract {
     /// Internal: resolve the effective fee config for the escrow token.
     ///
     /// Precedence: `TokenFeeConfig(token)` > global `FeeConfig`.
-    fn resolve_fee_config(env: &Env) -> (i128, i128, Address, bool) {
+    fn resolve_fee_config(env: &Env) -> (i128, i128, i128, i128, Address, bool) {
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         if let Some(tok_cfg) = env
             .storage()
@@ -1925,6 +1983,8 @@ impl BountyEscrowContract {
             (
                 tok_cfg.lock_fee_rate,
                 tok_cfg.release_fee_rate,
+                tok_cfg.lock_fixed_fee,
+                tok_cfg.release_fixed_fee,
                 tok_cfg.fee_recipient,
                 tok_cfg.fee_enabled,
             )
@@ -1933,6 +1993,8 @@ impl BountyEscrowContract {
             (
                 global.lock_fee_rate,
                 global.release_fee_rate,
+                global.lock_fixed_fee,
+                global.release_fixed_fee,
                 global.fee_recipient,
                 global.fee_enabled,
             )
@@ -2144,17 +2206,16 @@ impl BountyEscrowContract {
         soroban_sdk::log!(&env, "transfer ok");
 
         // Resolve effective fee config (per-token takes precedence over global).
-        let (lock_fee_rate, _release_fee_rate, fee_recipient, fee_enabled) =
+        let (lock_fee_rate, _release_fee_rate, lock_fixed_fee, _release_fixed, fee_recipient, fee_enabled) =
             Self::resolve_fee_config(&env);
 
-        // Deduct lock fee from the escrowed principal.
-        // Ceiling division ensures fee >= 1 stroop whenever rate > 0,
-        // preventing principal drain via dust-amount splitting.
-        let fee_amount = if fee_enabled && lock_fee_rate > 0 {
-            Self::calculate_fee(amount, lock_fee_rate)
-        } else {
-            0
-        };
+        // Deduct lock fee from the escrowed principal (percentage + fixed, capped at deposit).
+        let fee_amount = Self::combined_fee_amount(
+            amount,
+            lock_fee_rate,
+            lock_fixed_fee,
+            fee_enabled,
+        );
 
         // Net amount stored in escrow after fee.
         // Fee must never exceed the deposit; guard against misconfiguration.
@@ -2173,6 +2234,7 @@ impl BountyEscrowContract {
                     operation_type: events::FeeOperationType::Lock,
                     amount: fee_amount,
                     fee_rate: lock_fee_rate,
+                    fee_fixed: lock_fixed_fee,
                     recipient: fee_recipient,
                     timestamp: env.ledger().timestamp(),
                 },
@@ -2328,13 +2390,10 @@ impl BountyEscrowContract {
             return Err(Error::InsufficientFunds);
         }
         // 8. Fee computation (pure)
-        let (lock_fee_rate, _release_fee_rate, _fee_recipient, fee_enabled) =
+        let (lock_fee_rate, _release_fee_rate, lock_fixed_fee, _release_fixed, _fee_recipient, fee_enabled) =
             Self::resolve_fee_config(env);
-        let fee_amount = if fee_enabled && lock_fee_rate > 0 {
-            Self::calculate_fee(amount, lock_fee_rate)
-        } else {
-            0
-        };
+        let fee_amount =
+            Self::combined_fee_amount(amount, lock_fee_rate, lock_fixed_fee, fee_enabled);
         let net_amount = amount.checked_sub(fee_amount).unwrap_or(amount);
         if net_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -2518,14 +2577,15 @@ impl BountyEscrowContract {
         }
 
         // Resolve effective fee config for release.
-        let (_lock_fee_rate, release_fee_rate, fee_recipient, fee_enabled) =
+        let (_lock_fee_rate, release_fee_rate, _lock_fixed, release_fixed_fee, fee_recipient, fee_enabled) =
             Self::resolve_fee_config(&env);
 
-        let release_fee = if fee_enabled && release_fee_rate > 0 {
-            Self::calculate_fee(escrow.amount, release_fee_rate)
-        } else {
-            0
-        };
+        let release_fee = Self::combined_fee_amount(
+            escrow.amount,
+            release_fee_rate,
+            release_fixed_fee,
+            fee_enabled,
+        );
 
         // Net payout to contributor after release fee.
         let net_payout = escrow
@@ -2560,6 +2620,7 @@ impl BountyEscrowContract {
                     operation_type: events::FeeOperationType::Release,
                     amount: release_fee,
                     fee_rate: release_fee_rate,
+                    fee_fixed: release_fixed_fee,
                     recipient: fee_recipient,
                     timestamp: env.ledger().timestamp(),
                 },
@@ -2640,13 +2701,14 @@ impl BountyEscrowContract {
         if escrow.status != EscrowStatus::Locked {
             return Err(Error::FundsNotLocked);
         }
-        let (_lock_fee_rate, release_fee_rate, _fee_recipient, fee_enabled) =
+        let (_lock_fee_rate, release_fee_rate, _lock_fixed, release_fixed_fee, _fee_recipient, fee_enabled) =
             Self::resolve_fee_config(env);
-        let release_fee = if fee_enabled && release_fee_rate > 0 {
-            Self::calculate_fee(escrow.amount, release_fee_rate)
-        } else {
-            0
-        };
+        let release_fee = Self::combined_fee_amount(
+            escrow.amount,
+            release_fee_rate,
+            release_fixed_fee,
+            fee_enabled,
+        );
         let net_payout = escrow
             .amount
             .checked_sub(release_fee)
@@ -3147,7 +3209,7 @@ impl BountyEscrowContract {
             FundsReleased {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                amount: payout_amount,
+                amount: net_to_contributor,
                 recipient: contributor,
                 timestamp: env.ledger().timestamp(),
             },
@@ -5190,6 +5252,8 @@ impl traits::FeeInterface for BountyEscrowContract {
         env: &Env,
         lock_fee_rate: Option<i128>,
         release_fee_rate: Option<i128>,
+        lock_fixed_fee: Option<i128>,
+        release_fixed_fee: Option<i128>,
         fee_recipient: Option<Address>,
         fee_enabled: Option<bool>,
     ) -> Result<(), crate::Error> {
@@ -5204,6 +5268,8 @@ impl traits::FeeInterface for BountyEscrowContract {
             env.clone(),
             lock_fee_rate,
             release_fee_rate,
+            lock_fixed_fee,
+            release_fixed_fee,
             fee_recipient,
             fee_enabled,
         )
