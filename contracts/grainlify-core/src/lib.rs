@@ -2139,8 +2139,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Target version must be greater than current version")]
-    fn test_migration_repeated_same_version_rejected() {
+    fn test_migration_repeated_same_version_is_idempotent() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2156,8 +2155,9 @@ mod test {
         client.migrate(&3, &migration_hash);
         assert_eq!(client.get_version(), 3);
 
-        // Repeating same target is rejected by current migration guard
+        // Repeating same target is a no-op (idempotent)
         client.migrate(&3, &migration_hash);
+        assert_eq!(client.get_version(), 3);
     }
 
     #[test]
@@ -2399,7 +2399,6 @@ mod test {
     // ========================================================================
 
     #[test]
-    #[should_panic(expected = "Target version must be greater than current version")]
     fn test_migration_rejects_repeat_for_same_target_version() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2417,8 +2416,9 @@ mod test {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
         client.migrate(&3, &hash);
 
-        // Second call with same version is rejected by current migration guard
+        // Second call with same version is a no-op (idempotent)
         client.migrate(&3, &hash);
+        assert_eq!(client.get_version(), 3);
     }
 
     #[test]
