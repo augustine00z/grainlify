@@ -342,3 +342,235 @@ fn test_refund_after_deadline_no_approval_needed() {
     assert_eq!(info.status, EscrowStatus::Refunded);
     assert_eq!(token_client.balance(&depositor), 1000);
 }
+
+/// Admin approves an early refund (before deadline) to a custom recipient.
+/// Verifies that the approval is consumed after execution and the recipient
+/// receives the funds rather than the depositor.
+#[test]
+fn test_admin_early_refund_to_custom_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &5000);
+
+    let bounty_id = 301u64;
+    let deadline = env.ledger().timestamp() + 86400;
+    escrow_client.lock_funds(&depositor, &bounty_id, &5000, &deadline);
+
+    // Admin approves full refund to a custom recipient before deadline
+    escrow_client.approve_refund(&bounty_id, &5000, &recipient, &RefundMode::Full);
+
+    let (can_refund, deadline_passed, remaining, approval) =
+        escrow_client.get_refund_eligibility(&bounty_id);
+    assert!(can_refund);
+    assert!(!deadline_passed);
+    assert_eq!(remaining, 5000);
+    assert!(approval.is_some());
+
+    escrow_client.refund(&bounty_id);
+
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Refunded);
+    assert_eq!(info.remaining_amount, 0);
+    // Funds went to the custom recipient, not the depositor
+    assert_eq!(token_client.balance(&recipient), 5000);
+    assert_eq!(token_client.balance(&depositor), 0);
+
+    // Approval is consumed — a second refund attempt must fail
+    let res = escrow_client.try_refund(&bounty_id);
+    assert!(res.is_err());
+}
+
+/// Refund on a bounty that does not exist returns BountyNotFound.
+#[test]
+fn test_refund_nonexistent_bounty_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_client, _) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+
+    let res = escrow_client.try_refund(&9999u64);
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().unwrap(), Error::BountyNotFound);
+}
+
+/// Refund on an already-refunded escrow returns FundsNotLocked.
+#[test]
+fn test_refund_already_refunded_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &1000);
+
+    let bounty_id = 302u64;
+    let deadline = env.ledger().timestamp() + 100;
+    escrow_client.lock_funds(&depositor, &bounty_id, &1000, &deadline);
+
+    env.ledger().set_timestamp(deadline + 1);
+    escrow_client.refund(&bounty_id);
+
+    // Second refund must fail
+    let res = escrow_client.try_refund(&bounty_id);
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().unwrap(), Error::FundsNotLocked);
+}
+
+/// Refund is blocked when the refund operation is paused.
+#[test]
+fn test_refund_blocked_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &1000);
+
+    let bounty_id = 303u64;
+    let deadline = env.ledger().timestamp() + 100;
+    escrow_client.lock_funds(&depositor, &bounty_id, &1000, &deadline);
+
+    // Pause refunds
+    escrow_client.set_paused(&None, &None, &Some(true), &None);
+
+    env.ledger().set_timestamp(deadline + 1);
+
+    let res = escrow_client.try_refund(&bounty_id);
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().unwrap(), Error::FundsPaused);
+
+    // Unpause and verify refund works
+    escrow_client.set_paused(&None, &None, &Some(false), &None);
+    escrow_client.refund(&bounty_id);
+
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Refunded);
+}
+
+/// Sequential partial refunds drain the escrow correctly and the final
+/// refund transitions status to Refunded.
+#[test]
+fn test_sequential_partial_refunds_drain_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &3000);
+
+    let bounty_id = 304u64;
+    let deadline = env.ledger().timestamp() + 86400;
+    escrow_client.lock_funds(&depositor, &bounty_id, &3000, &deadline);
+
+    // First partial refund: 1000
+    escrow_client.approve_refund(&bounty_id, &1000, &depositor, &RefundMode::Partial);
+    escrow_client.refund(&bounty_id);
+
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::PartiallyRefunded);
+    assert_eq!(info.remaining_amount, 2000);
+    assert_eq!(token_client.balance(&depositor), 1000);
+
+    // Second partial refund: 1000
+    escrow_client.approve_refund(&bounty_id, &1000, &depositor, &RefundMode::Partial);
+    escrow_client.refund(&bounty_id);
+
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::PartiallyRefunded);
+    assert_eq!(info.remaining_amount, 1000);
+    assert_eq!(token_client.balance(&depositor), 2000);
+
+    // Final full refund: remaining 1000
+    escrow_client.approve_refund(&bounty_id, &1000, &depositor, &RefundMode::Full);
+    escrow_client.refund(&bounty_id);
+
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Refunded);
+    assert_eq!(info.remaining_amount, 0);
+    assert_eq!(token_client.balance(&depositor), 3000);
+
+    // History has three entries
+    let history = escrow_client.get_refund_history(&bounty_id);
+    assert_eq!(history.len(), 3);
+}
+
+/// dry_run_refund returns success=true after deadline and success=false before.
+#[test]
+fn test_dry_run_refund_reflects_eligibility() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &500);
+
+    let bounty_id = 305u64;
+    let deadline = env.ledger().timestamp() + 200;
+    escrow_client.lock_funds(&depositor, &bounty_id, &500, &deadline);
+
+    // Before deadline, no approval → dry run should fail
+    let result = escrow_client.dry_run_refund(&bounty_id);
+    assert!(!result.success);
+
+    // After deadline → dry run should succeed
+    env.ledger().set_timestamp(deadline + 1);
+    let result = escrow_client.dry_run_refund(&bounty_id);
+    assert!(result.success);
+    assert_eq!(result.amount, 500);
+    assert_eq!(result.resulting_status, EscrowStatus::Refunded);
+
+    // Actual state is unchanged (dry run is read-only)
+    let info = escrow_client.get_escrow_info(&bounty_id);
+    assert_eq!(info.status, EscrowStatus::Locked);
+}
+
+/// Refund before deadline without admin approval returns DeadlineNotPassed.
+#[test]
+fn test_refund_before_deadline_without_approval_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let depositor = Address::generate(&env);
+    let (token_client, token_admin) = create_token_contract(&env, &admin);
+    let escrow_client = create_escrow_contract(&env);
+
+    escrow_client.init(&admin, &token_client.address);
+    token_admin.mint(&depositor, &1000);
+
+    let bounty_id = 306u64;
+    let deadline = env.ledger().timestamp() + 500;
+    escrow_client.lock_funds(&depositor, &bounty_id, &1000, &deadline);
+
+    let res = escrow_client.try_refund(&bounty_id);
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().unwrap(), Error::DeadlineNotPassed);
+}
